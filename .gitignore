@@ -1,4 +1,5 @@
 test/
+tools/*.exe
 *.user
 *.suo
 *.pdb
