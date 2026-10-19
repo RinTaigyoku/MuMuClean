@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyDescription("MuMuPlayer 国际版可逆广告清理工具")]
 [assembly: System.Reflection.AssemblyCompany("Local Utility")]
 [assembly: System.Reflection.AssemblyProduct("MuMu 清爽助手")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.1.1.0")]
 
 namespace MuMuClean
 {
@@ -56,7 +56,8 @@ namespace MuMuClean
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
-            Icon = SystemIcons.Shield;
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+            catch { Icon = SystemIcons.Application; }
 
             var top = new Panel { Dock = DockStyle.Top, Height = 122, BackColor = Color.FromArgb(20, 27, 39) };
             Controls.Add(top);
@@ -215,15 +216,33 @@ namespace MuMuClean
 
             if (adb != null && serial != null)
             {
-                foreach (string c in Components)
+                // 旧版曾停用整个 MuMu 商店包，导致 APK/XAPK 安装链路不可用。
+                // 新版先恢复原本启用的商店包，再仅处理广告组件。
+                bool wasDisabled = String.Equals(ReadState("StoreWasDisabled"), "True", StringComparison.OrdinalIgnoreCase);
+                if (!wasDisabled)
                 {
-                    Run(adb, "-s " + serial + " shell pm disable-user --user 0 " + c);
-                    p.Report("已关闭推荐组件：" + c.Substring(c.IndexOf('/') + 1));
+                    Run(adb, "-s " + serial + " shell pm default-state --user 0 com.mumu.store");
+                    p.Report("已确认 MuMu 商店和软件安装能力保持启用。");
                 }
-                Run(adb, "-s " + serial + " shell pm disable-user --user 0 com.mumu.store");
+
+                bool rooted = RestartAdbAsRoot(adb, serial, p);
+                if (rooted)
+                {
+                    foreach (string c in Components)
+                    {
+                        var result = Run(adb, "-s " + serial + " shell pm disable --user 0 " + c);
+                        if (result.Code == 0 && result.Output.IndexOf("Exception", StringComparison.OrdinalIgnoreCase) < 0)
+                            p.Report("已关闭广告组件：" + c.Substring(c.IndexOf('/') + 1));
+                        else
+                            p.Report("组件处理失败，已跳过：" + c.Substring(c.IndexOf('/') + 1));
+                    }
+                    RestoreAdbShell(adb, serial);
+                }
+                else p.Report("当前实例不允许 ADB root，已保留安装能力并跳过 Android 组件修改。");
+
                 Run(adb, "-s " + serial + " shell am force-stop app.lawnchair");
                 Run(adb, "-s " + serial + " shell am start -a android.intent.action.MAIN -c android.intent.category.HOME");
-                p.Report("已关闭 MuMu 商店推广源并刷新桌面（用户应用和桌面布局未删除）。");
+                p.Report("已刷新桌面，用户应用和桌面布局未删除。");
             }
             else p.Report("模拟器未运行：Windows 端已完成；启动模拟器后请再次点击“全面去除广告”完成桌面处理。");
 
@@ -247,7 +266,11 @@ namespace MuMuClean
             string serial = adb == null ? null : ConnectAdb(adb, p);
             if (adb != null && serial != null)
             {
-                foreach (string c in Components) Run(adb, "-s " + serial + " shell pm default-state --user 0 " + c);
+                if (RestartAdbAsRoot(adb, serial, p))
+                {
+                    foreach (string c in Components) Run(adb, "-s " + serial + " shell pm default-state --user 0 " + c);
+                    RestoreAdbShell(adb, serial);
+                }
                 bool wasDisabled = String.Equals(ReadState("StoreWasDisabled"), "True", StringComparison.OrdinalIgnoreCase);
                 Run(adb, "-s " + serial + " shell pm " + (wasDisabled ? "disable-user" : "default-state") + " --user 0 com.mumu.store");
                 Run(adb, "-s " + serial + " shell am force-stop app.lawnchair");
@@ -280,6 +303,22 @@ namespace MuMuClean
                 if (o.Contains("device")) { p.Report("已连接 Android 实例：" + s); return s; }
             }
             return null;
+        }
+
+        bool RestartAdbAsRoot(string adb, string serial, IProgress<string> p)
+        {
+            Run(adb, "-s " + serial + " root");
+            Run(adb, "-s " + serial + " wait-for-device");
+            string identity = Run(adb, "-s " + serial + " shell id").Output;
+            bool rooted = identity.IndexOf("uid=0(root)", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (rooted) p.Report("已临时取得组件管理权限。");
+            return rooted;
+        }
+
+        void RestoreAdbShell(string adb, string serial)
+        {
+            Run(adb, "-s " + serial + " unroot");
+            Run(adb, "-s " + serial + " wait-for-device");
         }
 
         static string FindInstall()
