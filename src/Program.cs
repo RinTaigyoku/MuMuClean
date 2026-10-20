@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyDescription("MuMuPlayer 国际版可逆广告清理工具")]
 [assembly: System.Reflection.AssemblyCompany("Local Utility")]
 [assembly: System.Reflection.AssemblyProduct("MuMu 清爽助手")]
-[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
 
 namespace MuMuClean
 {
@@ -27,6 +27,11 @@ namespace MuMuClean
             if (args.Length > 0 && args[0] == "--self-test")
             {
                 Console.WriteLine(Cleaner.SelfTest());
+                return;
+            }
+            if (args.Length > 0 && args[0] == "--maa-check")
+            {
+                Console.WriteLine(Cleaner.MaaCheck());
                 return;
             }
             Application.EnableVisualStyles();
@@ -64,7 +69,7 @@ namespace MuMuClean
             var mark = new Label { Text = "M", AutoSize = false, Size = new Size(56, 56), Location = new Point(30, 28), TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.FromArgb(88, 101, 242), ForeColor = Color.White, Font = new Font("Segoe UI", 22F, FontStyle.Bold) };
             top.Controls.Add(mark);
             top.Controls.Add(new Label { Text = "MuMu 清爽助手", AutoSize = true, Location = new Point(104, 25), Font = new Font("Microsoft YaHei UI", 20F, FontStyle.Bold), ForeColor = Color.White });
-            top.Controls.Add(new Label { Text = "可逆 · 不改虚拟机镜像 · 不干扰更新器", AutoSize = true, Location = new Point(106, 70), ForeColor = Color.FromArgb(154, 164, 181) });
+            top.Controls.Add(new Label { Text = "可逆 · MAA 安全保护 · 不干扰更新器", AutoSize = true, Location = new Point(106, 70), ForeColor = Color.FromArgb(154, 164, 181) });
 
             status.Text = "正在检测…";
             status.Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold);
@@ -127,8 +132,8 @@ namespace MuMuClean
             SetBusy(true);
             if (clear) log.Clear();
             var info = await Task.Run(() => cleaner.Scan());
-            status.Text = info.Applied ? "已开启清爽模式" : (info.Found ? "已检测到 MuMuPlayer" : "未检测到 MuMuPlayer");
-            status.ForeColor = info.Applied ? Color.FromArgb(63, 214, 146) : (info.Found ? Color.White : Color.FromArgb(255, 184, 93));
+            status.Text = info.Applied ? "已开启清爽模式" : (info.Partial ? "还差一步即可完成" : (info.Found ? "已检测到 MuMuPlayer" : "未检测到 MuMuPlayer"));
+            status.ForeColor = info.Applied ? Color.FromArgb(63, 214, 146) : (info.Found ? Color.FromArgb(255, 184, 93) : Color.FromArgb(255, 184, 93));
             detail.Text = info.Message;
             if (clear) WriteLog(info.Details);
             SetBusy(false);
@@ -152,6 +157,8 @@ namespace MuMuClean
     {
         public bool Found;
         public bool Applied;
+        public bool Partial;
+        public bool MaaRunning;
         public string Message;
         public string Details;
     }
@@ -173,12 +180,17 @@ namespace MuMuClean
             string root = FindInstall();
             bool found = !String.IsNullOrEmpty(root) && Directory.Exists(root);
             bool fw = Run("netsh", "advfirewall firewall show rule name=\"" + RulePrefix + "MainCEF\"").Output.IndexOf(RulePrefix + "MainCEF", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool state = File.Exists(StateFile);
+            bool maa = IsMaaRunning();
+            string adb = found ? FindAdb(root) : null;
+            string serial = adb == null ? null : FindConnectedDevice(adb);
+            bool android = serial != null && AreComponentsDisabled(adb, serial);
             return new ScanInfo {
                 Found = found,
-                Applied = fw || state,
+                Applied = fw && android,
+                Partial = fw || android,
+                MaaRunning = maa,
                 Message = found ? ("版本 " + GetVersion(root) + "    安装位置：" + root) : "请先安装或启动 MuMuPlayer 国际版。",
-                Details = "Windows 外壳规则：" + (fw ? "已应用" : "未应用") + "\nAndroid 推荐组件：" + (state ? "已处理/有恢复记录" : "未处理") + "\n管理员权限：" + (IsAdmin() ? "正常" : "不足")
+                Details = "Windows 广告联网规则：" + (fw ? "已应用" : "未应用") + "\nAndroid 广告组件：" + (serial == null ? "模拟器未连接" : (android ? "已关闭" : "仍在启用")) + "\nMAA 安全保护：" + (maa ? "已启用（检测到 MAA 正在运行）" : "待命") + "\n管理员权限：" + (IsAdmin() ? "正常" : "不足")
             };
         }
 
@@ -218,15 +230,23 @@ namespace MuMuClean
             {
                 // 旧版曾停用整个 MuMu 商店包，导致 APK/XAPK 安装链路不可用。
                 // 新版先恢复原本启用的商店包，再仅处理广告组件。
-                bool wasDisabled = String.Equals(ReadState("StoreWasDisabled"), "True", StringComparison.OrdinalIgnoreCase);
-                if (!wasDisabled)
-                {
-                    Run(adb, "-s " + serial + " shell pm default-state --user 0 com.mumu.store");
-                    p.Report("已确认 MuMu 商店和软件安装能力保持启用。");
-                }
+                // 清爽模式必须保留安装能力。无论执行前是什么状态，应用期间都启用商店；
+                // 原始状态已经写入恢复点，点击“全面恢复”时仍能照原样还原。
+                Run(adb, "-s " + serial + " shell pm default-state --user 0 com.mumu.store");
+                p.Report("已确认 MuMu 商店和软件安装能力保持启用。");
 
-                bool rooted = RestartAdbAsRoot(adb, serial, p);
-                if (rooted)
+                bool componentsDone = AreComponentsDisabled(adb, serial);
+                bool maaRunning = IsMaaRunning();
+                if (componentsDone)
+                {
+                    p.Report("Android 广告组件已经关闭，无需重启 ADB。");
+                }
+                else if (maaRunning)
+                {
+                    p.Report("检测到 MAA 正在运行：为避免 ADB 瞬断，本次不切换 root。");
+                    p.Report("Windows 端已经完成；退出 MAA 后再点一次即可补齐 Android 广告组件。");
+                }
+                else if (RestartAdbAsRoot(adb, serial, p))
                 {
                     foreach (string c in Components)
                     {
@@ -237,17 +257,16 @@ namespace MuMuClean
                             p.Report("组件处理失败，已跳过：" + c.Substring(c.IndexOf('/') + 1));
                     }
                     RestoreAdbShell(adb, serial);
+                    p.Report("桌面推荐会在下次进入桌面或重启模拟器后消失。");
                 }
                 else p.Report("当前实例不允许 ADB root，已保留安装能力并跳过 Android 组件修改。");
-
-                Run(adb, "-s " + serial + " shell am force-stop app.lawnchair");
-                Run(adb, "-s " + serial + " shell am start -a android.intent.action.MAIN -c android.intent.category.HOME");
-                p.Report("已刷新桌面，用户应用和桌面布局未删除。");
             }
             else p.Report("模拟器未运行：Windows 端已完成；启动模拟器后请再次点击“全面去除广告”完成桌面处理。");
 
             p.Report("更新器、虚拟机网络、游戏数据和性能配置均未修改。");
-            return "完成。建议重启 MuMuPlayer 后检查界面。";
+            return IsMaaRunning() && serial != null && !AreComponentsDisabled(adb, serial)
+                ? "MAA 保护已生效。退出 MAA 后再点一次“全面去除广告”即可完成。"
+                : "完成。建议重启 MuMuPlayer 后检查界面。";
         }
 
         public string Restore(IProgress<string> p)
@@ -264,23 +283,33 @@ namespace MuMuClean
             if (String.IsNullOrEmpty(root)) root = FindInstall();
             string adb = FindAdb(root);
             string serial = adb == null ? null : ConnectAdb(adb, p);
+            bool restored = true;
             if (adb != null && serial != null)
             {
-                if (RestartAdbAsRoot(adb, serial, p))
+                if (!AreComponentsDisabled(adb, serial))
+                {
+                    p.Report("Android 广告组件已是默认状态，无需重启 ADB。");
+                }
+                else if (IsMaaRunning())
+                {
+                    restored = false;
+                    p.Report("检测到 MAA 正在运行：为避免 ADB 瞬断，Android 组件恢复已延期。");
+                    p.Report("退出 MAA 后再点一次“全面恢复”即可补齐。");
+                }
+                else if (RestartAdbAsRoot(adb, serial, p))
                 {
                     foreach (string c in Components) Run(adb, "-s " + serial + " shell pm default-state --user 0 " + c);
                     RestoreAdbShell(adb, serial);
                 }
+                else restored = false;
                 bool wasDisabled = String.Equals(ReadState("StoreWasDisabled"), "True", StringComparison.OrdinalIgnoreCase);
                 Run(adb, "-s " + serial + " shell pm " + (wasDisabled ? "disable-user" : "default-state") + " --user 0 com.mumu.store");
-                Run(adb, "-s " + serial + " shell am force-stop app.lawnchair");
-                Run(adb, "-s " + serial + " shell am start -a android.intent.action.MAIN -c android.intent.category.HOME");
-                p.Report("已恢复 Android 推荐组件和 MuMu 商店的原始启用状态。");
+                if (restored) p.Report("已恢复 Android 推荐组件和 MuMu 商店的原始启用状态。");
             }
             else p.Report("模拟器未运行：Windows 端已恢复；启动模拟器后再点一次“全面恢复”。");
 
-            if (File.Exists(StateFile) && serial != null) File.Delete(StateFile);
-            return "恢复完成。建议重启 MuMuPlayer。";
+            if (File.Exists(StateFile) && serial != null && restored) File.Delete(StateFile);
+            return restored ? "恢复完成。建议重启 MuMuPlayer。" : "Windows 端已恢复；退出 MAA 后再点一次补齐 Android 恢复。";
         }
 
         void AddFirewall(string root, string suffix, string exe, IProgress<string> p)
@@ -295,7 +324,13 @@ namespace MuMuClean
 
         string ConnectAdb(string adb, IProgress<string> p)
         {
-            string[] ports = { "127.0.0.1:7555", "127.0.0.1:5555" };
+            string connected = FindConnectedDevice(adb);
+            if (connected != null)
+            {
+                p.Report("已复用现有 Android 连接：" + connected);
+                return connected;
+            }
+            string[] ports = { "127.0.0.1:16384", "127.0.0.1:16416", "127.0.0.1:16448", "127.0.0.1:16480", "127.0.0.1:16512", "127.0.0.1:16544", "127.0.0.1:16576", "127.0.0.1:7555", "127.0.0.1:5555" };
             foreach (string s in ports)
             {
                 Run(adb, "connect " + s);
@@ -303,6 +338,52 @@ namespace MuMuClean
                 if (o.Contains("device")) { p.Report("已连接 Android 实例：" + s); return s; }
             }
             return null;
+        }
+
+        static string FindConnectedDevice(string adb)
+        {
+            Result result = Run(adb, "devices");
+            var devices = result.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                .Where(x => x.Length >= 2 && x[1] == "device")
+                .Select(x => x[0]).ToList();
+            string official = devices.FirstOrDefault(x => IsMaaPort(x));
+            if (official != null) return official;
+            string emulator = devices.FirstOrDefault(x => x.StartsWith("emulator-", StringComparison.OrdinalIgnoreCase));
+            return emulator ?? devices.FirstOrDefault();
+        }
+
+        static bool IsMaaPort(string serial)
+        {
+            if (!serial.StartsWith("127.0.0.1:", StringComparison.OrdinalIgnoreCase)) return false;
+            int port;
+            if (!Int32.TryParse(serial.Substring(serial.IndexOf(':') + 1), out port)) return false;
+            return port >= 16384 && port <= 16576 && (port - 16384) % 32 == 0;
+        }
+
+        static bool AreComponentsDisabled(string adb, string serial)
+        {
+            Result result = Run(adb, "-s " + serial + " shell dumpsys package com.mumu.store");
+            int marker = result.Output.IndexOf("disabledComponents:", StringComparison.OrdinalIgnoreCase);
+            if (marker < 0) return false;
+            string tail = result.Output.Substring(marker, Math.Min(2500, result.Output.Length - marker));
+            foreach (string component in Components)
+            {
+                string name = component.Substring(component.IndexOf('/') + 1).TrimStart('.');
+                if (tail.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            }
+            return true;
+        }
+
+        static bool IsMaaRunning()
+        {
+            string[] names = { "MAA", "MaaWpfGui", "MFAAvalonia" };
+            foreach (string name in names)
+            {
+                try { if (Process.GetProcessesByName(name).Length > 0) return true; }
+                catch { }
+            }
+            return false;
         }
 
         bool RestartAdbAsRoot(string adb, string serial, IProgress<string> p)
@@ -340,7 +421,8 @@ namespace MuMuClean
         static string FindAdb(string root)
         {
             if (String.IsNullOrEmpty(root)) return null;
-            string[] candidates = { Path.Combine(root, "nx_device", "15.0", "shell", "adb.exe"), Path.Combine(root, "nx_main", "adb.exe") };
+            // MAA 默认使用 nx_main\adb.exe。优先复用同一版本和同一个 ADB server，避免互相抢占。
+            string[] candidates = { Path.Combine(root, "nx_main", "adb.exe"), Path.Combine(root, "nx_device", "15.0", "shell", "adb.exe") };
             string found = candidates.FirstOrDefault(File.Exists);
             if (found != null) return found;
             try
@@ -392,6 +474,28 @@ namespace MuMuClean
             lines.Add("ADB=" + (FindAdb(root) ?? "NOT_FOUND"));
             lines.Add("Admin=" + IsAdmin());
             lines.Add("State=" + StateFile);
+            return String.Join(Environment.NewLine, lines.ToArray());
+        }
+
+        public static string MaaCheck()
+        {
+            string root = FindInstall();
+            string adb = FindAdb(root);
+            string serial = adb == null ? null : FindConnectedDevice(adb);
+            var lines = new List<string>();
+            lines.Add("MAA-CHECK " + (serial == null ? "INCOMPLETE" : "OK"));
+            lines.Add("MAA=" + (IsMaaRunning() ? "RUNNING (PROTECTED)" : "NOT_RUNNING"));
+            lines.Add("ADB=" + (adb ?? "NOT_FOUND"));
+            lines.Add("Device=" + (serial ?? "NOT_CONNECTED"));
+            if (adb != null && serial != null)
+            {
+                lines.Add("Identity=" + Run(adb, "-s " + serial + " shell id").Output.Trim());
+                bool storeEnabled = Run(adb, "-s " + serial + " shell pm list packages -e com.mumu.store").Output.Contains("package:com.mumu.store");
+                bool installerEnabled = Run(adb, "-s " + serial + " shell pm list packages -e com.android.packageinstaller").Output.Contains("package:com.android.packageinstaller");
+                lines.Add("StoreEnabled=" + storeEnabled);
+                lines.Add("InstallerEnabled=" + installerEnabled);
+                lines.Add("AdComponentsDisabled=" + AreComponentsDisabled(adb, serial));
+            }
             return String.Join(Environment.NewLine, lines.ToArray());
         }
 
