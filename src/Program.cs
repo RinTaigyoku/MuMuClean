@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyDescription("MuMuPlayer 国际版可逆广告清理工具")]
 [assembly: System.Reflection.AssemblyCompany("Local Utility")]
 [assembly: System.Reflection.AssemblyProduct("MuMu 清爽助手")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
 
 namespace MuMuClean
 {
@@ -49,6 +49,8 @@ namespace MuMuClean
         readonly Button apply = new Button();
         readonly Button restore = new Button();
         readonly Button scan = new Button();
+        readonly Button optimize = new Button();
+        readonly Button undoOptimize = new Button();
 
         public MainForm()
         {
@@ -86,9 +88,12 @@ namespace MuMuClean
             StyleButton(restore, "全面恢复", new Point(240, 245), Color.FromArgb(48, 58, 73));
             StyleButton(scan, "重新检测", new Point(450, 245), Color.FromArgb(48, 58, 73));
             Controls.Add(apply); Controls.Add(restore); Controls.Add(scan);
+            StyleButton(optimize, "省占用（30 FPS）", new Point(30, 305), Color.FromArgb(48, 58, 73));
+            StyleButton(undoOptimize, "恢复原始帧率", new Point(240, 305), Color.FromArgb(48, 58, 73));
+            Controls.Add(optimize); Controls.Add(undoOptimize);
 
-            log.Location = new Point(30, 325);
-            log.Size = new Size(760, 205);
+            log.Location = new Point(30, 375);
+            log.Size = new Size(760, 155);
             log.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom | AnchorStyles.Top;
             log.BackColor = Color.FromArgb(10, 14, 21);
             log.ForeColor = Color.FromArgb(202, 211, 225);
@@ -100,6 +105,8 @@ namespace MuMuClean
             apply.Click += async (s, e) => await RunAction(true);
             restore.Click += async (s, e) => await RunAction(false);
             scan.Click += async (s, e) => await RefreshStatus();
+            optimize.Click += async (s, e) => await RunOptimize(false);
+            undoOptimize.Click += async (s, e) => await RunOptimize(true);
             Shown += async (s, e) => await RefreshStatus();
         }
 
@@ -142,7 +149,16 @@ namespace MuMuClean
         void SetBusy(bool busy)
         {
             apply.Enabled = restore.Enabled = scan.Enabled = !busy;
+            optimize.Enabled = undoOptimize.Enabled = !busy;
             UseWaitCursor = busy;
+        }
+
+        async Task RunOptimize(bool undo)
+        {
+            SetBusy(true);
+            try { WriteLog(await Task.Run(() => cleaner.Optimize(undo))); }
+            catch (Exception ex) { WriteLog("失败：" + ex.Message); }
+            finally { SetBusy(false); }
         }
 
         void WriteLog(string text)
@@ -184,13 +200,15 @@ namespace MuMuClean
             string adb = found ? FindAdb(root) : null;
             string serial = adb == null ? null : FindConnectedDevice(adb);
             bool android = serial != null && AreComponentsDisabled(adb, serial);
+            bool overlay = serial != null && Run(adb, "-s " + serial + " shell cmd appops get com.mumu.store SYSTEM_ALERT_WINDOW").Output.Contains("SYSTEM_ALERT_WINDOW: ignore");
+            bool startup = File.Exists(StartupIndex()) && File.ReadAllText(StartupIndex()).Replace(" ", "").Contains("\"info\":[]");
             return new ScanInfo {
                 Found = found,
-                Applied = fw && android,
+                Applied = fw && android && overlay && startup,
                 Partial = fw || android,
                 MaaRunning = maa,
                 Message = found ? ("版本 " + GetVersion(root) + "    安装位置：" + root) : "请先安装或启动 MuMuPlayer 国际版。",
-                Details = "Windows 广告联网规则：" + (fw ? "已应用" : "未应用") + "\nAndroid 广告组件：" + (serial == null ? "模拟器未连接" : (android ? "已关闭" : "仍在启用")) + "\nMAA 安全保护：" + (maa ? "已启用（检测到 MAA 正在运行）" : "待命") + "\n管理员权限：" + (IsAdmin() ? "正常" : "不足")
+                Details = "Windows 广告联网规则：" + (fw ? "已应用" : "未应用") + "\nAndroid 广告组件：" + (serial == null ? "模拟器未连接" : (android ? "已关闭" : "仍在启用")) + "\n商店悬浮窗限制：" + overlay + "；启动缓存索引已清空：" + startup + "\nMAA 安全保护：" + (maa ? "已启用（检测到 MAA 正在运行）" : "待命") + "\n管理员权限：" + (IsAdmin() ? "正常" : "不足")
             };
         }
 
@@ -225,6 +243,7 @@ namespace MuMuClean
             Run("netsh", "advfirewall firewall delete rule name=\"" + RulePrefix + "Main\"");
             AddFirewall(root, "MainCEF", Path.Combine(root, "nx_main", "CefView", "CefViewWing.exe"), p);
             AddFirewall(root, "DeviceCEF", Path.Combine(root, "nx_device", "15.0", "shell", "CefView", "CefViewWing.exe"), p);
+            ApplyStartupCache(p);
 
             if (adb != null && serial != null)
             {
@@ -234,6 +253,7 @@ namespace MuMuClean
                 // 原始状态已经写入恢复点，点击“全面恢复”时仍能照原样还原。
                 Run(adb, "-s " + serial + " shell pm default-state --user 0 com.mumu.store");
                 p.Report("已确认 MuMu 商店和软件安装能力保持启用。");
+                ApplyOverlay(adb, serial, p);
 
                 bool componentsDone = AreComponentsDisabled(adb, serial);
                 bool maaRunning = IsMaaRunning();
@@ -283,10 +303,12 @@ namespace MuMuClean
             if (String.IsNullOrEmpty(root)) root = FindInstall();
             string adb = FindAdb(root);
             string serial = adb == null ? null : ConnectAdb(adb, p);
+            RestoreStartupCache(p);
+            if (serial != null) RestoreOverlay(adb, serial, p);
             bool restored = true;
             if (adb != null && serial != null)
             {
-                if (!AreComponentsDisabled(adb, serial))
+                if (!AreComponentsDisabled(adb, serial, false))
                 {
                     p.Report("Android 广告组件已是默认状态，无需重启 ADB。");
                 }
@@ -310,6 +332,114 @@ namespace MuMuClean
 
             if (File.Exists(StateFile) && serial != null && restored) File.Delete(StateFile);
             return restored ? "恢复完成。建议重启 MuMuPlayer。" : "Windows 端已恢复；退出 MAA 后再点一次补齐 Android 恢复。";
+        }
+
+        static string StartupIndex()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Netease", "MuMuPlayerGlobal", "data", "startupImage", "imageManager.json");
+        }
+
+        static string StartupBackup() { return Path.Combine(StateDir, "startup-" + Environment.UserName + ".bak"); }
+
+        void ApplyStartupCache(IProgress<string> p)
+        {
+            string file = StartupIndex();
+            if (!File.Exists(file)) { p.Report("尚无启动广告索引，启动缓存处理已跳过。"); return; }
+            string backup = StartupBackup();
+            if (!File.Exists(backup))
+            {
+                File.Copy(file, backup);
+                File.WriteAllText(backup + ".attributes", ((int)File.GetAttributes(file)).ToString());
+            }
+            File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+            File.WriteAllText(file, "{\"info\":[]}", new UTF8Encoding(false));
+            File.SetAttributes(file, File.GetAttributes(file) | FileAttributes.ReadOnly);
+            p.Report("已备份并清空当前用户的启动推广索引；普通写入已限制。更新后仍需重新检测。");
+        }
+
+        void RestoreStartupCache(IProgress<string> p)
+        {
+            string file = StartupIndex(), backup = StartupBackup();
+            if (!File.Exists(backup)) return;
+            if (File.Exists(file)) File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            File.Copy(backup, file, true);
+            int attrs;
+            if (File.Exists(backup + ".attributes") && Int32.TryParse(File.ReadAllText(backup + ".attributes"), out attrs))
+                File.SetAttributes(file, (FileAttributes)attrs);
+            File.Delete(backup);
+            if (File.Exists(backup + ".attributes")) File.Delete(backup + ".attributes");
+            p.Report("已恢复启动推广索引和原始文件属性。");
+        }
+
+        static string OverlayBackup(string adb, string serial)
+        {
+            string id = Run(adb, "-s " + serial + " shell settings get secure android_id").Output.Trim();
+            if (!System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-fA-F0-9]{8,32}$"))
+                throw new InvalidOperationException("无法确认 Android 实例身份，已停止保存恢复点。");
+            return Path.Combine(StateDir, "overlay-" + id + ".ini");
+        }
+
+        void ApplyOverlay(string adb, string serial, IProgress<string> p)
+        {
+            string backup = OverlayBackup(adb, serial);
+            if (!File.Exists(backup))
+            {
+                Result before = Run(adb, "-s " + serial + " shell cmd appops get com.mumu.store SYSTEM_ALERT_WINDOW");
+                if (before.Code != 0) throw new InvalidOperationException("无法读取商店悬浮窗原始状态。");
+                var m = System.Text.RegularExpressions.Regex.Match(before.Output, @"SYSTEM_ALERT_WINDOW:\s*(allow|ignore|deny|default|foreground)");
+                if (!m.Success && before.Output.IndexOf("No operations", StringComparison.OrdinalIgnoreCase) < 0)
+                    throw new InvalidOperationException("无法识别商店悬浮窗原始状态。");
+                File.WriteAllText(backup, m.Success ? m.Groups[1].Value : "default");
+            }
+            Result set = Run(adb, "-s " + serial + " shell cmd appops set com.mumu.store SYSTEM_ALERT_WINDOW ignore");
+            if (set.Code != 0) throw new InvalidOperationException("设置商店悬浮窗失败：" + set.Output);
+            string current = Run(adb, "-s " + serial + " shell cmd appops get com.mumu.store SYSTEM_ALERT_WINDOW").Output;
+            if (!current.Contains("SYSTEM_ALERT_WINDOW: ignore")) throw new InvalidOperationException("商店悬浮窗状态校验失败。");
+            p.Report("已限制商店悬浮窗弹广告权限，安装服务保持启用；没有重启 ADB。");
+        }
+
+        void RestoreOverlay(string adb, string serial, IProgress<string> p)
+        {
+            string backup = OverlayBackup(adb, serial);
+            if (!File.Exists(backup)) return;
+            string mode = File.ReadAllText(backup).Trim();
+            if (!new[] { "allow", "ignore", "deny", "default", "foreground" }.Contains(mode))
+                throw new InvalidOperationException("恢复记录格式有误。");
+            Result set = Run(adb, "-s " + serial + " shell cmd appops set com.mumu.store SYSTEM_ALERT_WINDOW " + mode);
+            if (set.Code != 0) throw new InvalidOperationException("商店悬浮窗恢复失败。");
+            File.Delete(backup);
+            p.Report("已恢复商店悬浮窗原始权限。");
+        }
+
+        public string Optimize(bool undo)
+        {
+            RequireAdmin();
+            string manager = Path.Combine(FindInstall() ?? "", "nx_main", "MuMuManager.exe");
+            if (!File.Exists(manager)) throw new InvalidOperationException("找不到 MuMu 官方配置工具。");
+            // 当前仅支持主实例，避免把多开的其他实例一并修改。
+            string backup = Path.Combine(StateDir, "fps-main.ini");
+            string before = Run(manager, "setting -v 0 --key max_frame_rate").Output;
+            var match = System.Text.RegularExpressions.Regex.Match(before, "\\\"max_frame_rate\\\"\\s*:\\s*\\\"?(\\d+)");
+            int oldFps;
+            if (!match.Success || !Int32.TryParse(match.Groups[1].Value, out oldFps) || oldFps < 1 || oldFps > 480)
+                throw new InvalidOperationException("无法读取主实例帧率，未修改设置。");
+            Directory.CreateDirectory(StateDir);
+            int target = Math.Min(oldFps, 30);
+            if (undo)
+            {
+                if (!File.Exists(backup)) return "没有需要恢复的帧率记录。";
+                if (!Int32.TryParse(File.ReadAllText(backup), out target) || target < 1 || target > 480)
+                    throw new InvalidOperationException("帧率恢复记录有误。");
+            }
+            else if (!File.Exists(backup)) File.WriteAllText(backup, oldFps.ToString());
+            Result set = Run(manager, "setting -v 0 --key max_frame_rate --value " + target);
+            string verify = Run(manager, "setting -v 0 --key max_frame_rate").Output;
+            var checkedValue = System.Text.RegularExpressions.Regex.Match(verify, "\\\"max_frame_rate\\\"\\s*:\\s*\\\"?(\\d+)");
+            if (set.Code != 0 || !checkedValue.Success || checkedValue.Groups[1].Value != target.ToString())
+                throw new InvalidOperationException("官方配置接口未确认修改成功，恢复记录已保留。");
+            if (undo) File.Delete(backup);
+            return undo ? "主实例帧率已恢复为 " + target + " FPS。" : "主实例帧率上限设为 " + target + " FPS。流畅度会降低，实际占用收益取决于游戏；可随时恢复。";
         }
 
         void AddFirewall(string root, string suffix, string exe, IProgress<string> p)
@@ -350,7 +480,7 @@ namespace MuMuClean
             string official = devices.FirstOrDefault(x => IsMaaPort(x));
             if (official != null) return official;
             string emulator = devices.FirstOrDefault(x => x.StartsWith("emulator-", StringComparison.OrdinalIgnoreCase));
-            return emulator ?? devices.FirstOrDefault();
+            return emulator;
         }
 
         static bool IsMaaPort(string serial)
@@ -361,18 +491,19 @@ namespace MuMuClean
             return port >= 16384 && port <= 16576 && (port - 16384) % 32 == 0;
         }
 
-        static bool AreComponentsDisabled(string adb, string serial)
+        static bool AreComponentsDisabled(string adb, string serial, bool requireAll = true)
         {
             Result result = Run(adb, "-s " + serial + " shell dumpsys package com.mumu.store");
             int marker = result.Output.IndexOf("disabledComponents:", StringComparison.OrdinalIgnoreCase);
             if (marker < 0) return false;
             string tail = result.Output.Substring(marker, Math.Min(2500, result.Output.Length - marker));
+            int matched = 0;
             foreach (string component in Components)
             {
                 string name = component.Substring(component.IndexOf('/') + 1).TrimStart('.');
-                if (tail.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) return false;
+                if (tail.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) matched++;
             }
-            return true;
+            return requireAll ? matched == Components.Length : matched > 0;
         }
 
         static bool IsMaaRunning()
@@ -508,10 +639,15 @@ namespace MuMuClean
                 var psi = new ProcessStartInfo(file, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8 };
                 using (var pr = Process.Start(psi))
                 {
-                    string output = pr.StandardOutput.ReadToEnd();
-                    string error = pr.StandardError.ReadToEnd();
-                    pr.WaitForExit(15000);
-                    return new Result { Code = pr.ExitCode, Output = output + error };
+                    Task<string> output = pr.StandardOutput.ReadToEndAsync();
+                    Task<string> error = pr.StandardError.ReadToEndAsync();
+                    if (!pr.WaitForExit(15000))
+                    {
+                        pr.Kill();
+                        return new Result { Code = -1, Output = "命令超时，已结束本次命令进程。" };
+                    }
+                    Task.WaitAll(output, error);
+                    return new Result { Code = pr.ExitCode, Output = output.Result + error.Result };
                 }
             }
             catch (Exception ex) { return new Result { Code = -1, Output = ex.Message }; }
