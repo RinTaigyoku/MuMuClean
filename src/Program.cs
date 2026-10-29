@@ -15,7 +15,7 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyCompany("Local Utility")]
 [assembly: System.Reflection.AssemblyProduct("MuMu 清爽助手")]
 [assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.3.0.1")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
 
 namespace MuMuClean
 {
@@ -51,7 +51,6 @@ namespace MuMuClean
         readonly Button scan = new Button();
         readonly Button optimize = new Button();
         readonly Button undoOptimize = new Button();
-        readonly Button closeMuMu = new Button();
 
         public MainForm()
         {
@@ -92,14 +91,6 @@ namespace MuMuClean
             StyleButton(optimize, "省占用（30 FPS）", new Point(30, 305), Color.FromArgb(48, 58, 73));
             StyleButton(undoOptimize, "恢复原始帧率", new Point(240, 305), Color.FromArgb(48, 58, 73));
             Controls.Add(optimize); Controls.Add(undoOptimize);
-            StyleButton(closeMuMu, "按顺序退出 MuMu", new Point(450, 305), Color.FromArgb(48, 58, 73));
-            Controls.Add(closeMuMu);
-            closeMuMu.Click += async (s, e) => {
-                SetBusy(true);
-                try { WriteLog(await Task.Run(() => cleaner.CloseInOrder())); }
-                catch (Exception ex) { WriteLog("退出未完成：" + ex.Message); }
-                finally { SetBusy(false); }
-            };
 
             log.Location = new Point(30, 375);
             log.Size = new Size(760, 155);
@@ -159,7 +150,6 @@ namespace MuMuClean
         {
             apply.Enabled = restore.Enabled = scan.Enabled = !busy;
             optimize.Enabled = undoOptimize.Enabled = !busy;
-            closeMuMu.Enabled = !busy;
             UseWaitCursor = busy;
         }
 
@@ -420,43 +410,6 @@ namespace MuMuClean
             if (set.Code != 0) throw new InvalidOperationException("商店悬浮窗恢复失败。");
             File.Delete(backup);
             p.Report("已恢复商店悬浮窗原始权限。");
-        }
-
-        public string CloseInOrder()
-        {
-            if (IsMaaRunning()) return "请先结束任务并退出 MAA，再按顺序退出 MuMu，避免中断自动操作。";
-            string root = FindInstall();
-            if (root == null) throw new InvalidOperationException("没有找到 MuMu。");
-            string manager = Path.Combine(root, "nx_main", "MuMuManager.exe");
-            if (!File.Exists(manager)) throw new InvalidOperationException("找不到官方管理接口。");
-            // 仅处理本安装目录的主实例；多开情况下要求用户先自行关闭其他实例。
-            Result all = Run(manager, "info -v all");
-            if (all.Code != 0) throw new InvalidOperationException("无法读取实例状态，停止退出。");
-            var started = System.Text.RegularExpressions.Regex.Matches(all.Output, "\\\"is_process_started\\\"\\s*:\\s*true");
-            if (started.Count > 1) return "检测到多个运行实例，请先自行关闭其他实例。";
-            Result primary = Run(manager, "info -v 0");
-            if (primary.Code != 0 || !primary.Output.Contains("is_process_started")) throw new InvalidOperationException("无法确认主实例状态。");
-            if (started.Count == 1 && !System.Text.RegularExpressions.Regex.IsMatch(primary.Output, "\\\"is_process_started\\\"\\s*:\\s*true"))
-                return "正在运行的是其他多开实例，请先自行关闭该实例。";
-            var main = Process.GetProcessesByName("MuMuNxMain").Where(x => {
-                try { return String.Equals(x.MainModule.FileName, Path.Combine(root, "nx_main", "MuMuNxMain.exe"), StringComparison.OrdinalIgnoreCase); }
-                catch { return false; }
-            }).ToArray();
-            Result shutdown = Run(manager, "control -v 0 shutdown");
-            if (shutdown.Code != 0) throw new InvalidOperationException("官方实例关闭命令失败。");
-            bool stopped = false;
-            for (int i = 0; i < 30; i++)
-            {
-                Result info = Run(manager, "info -v 0");
-                if (info.Code == 0 && System.Text.RegularExpressions.Regex.IsMatch(info.Output, "\\\"is_process_started\\\"\\s*:\\s*false")) { stopped = true; break; }
-                System.Threading.Thread.Sleep(500);
-            }
-            if (!stopped) throw new InvalidOperationException("Android 未确认停止，已保留管理器，未强杀进程。");
-            Result close = Run(manager, "main close");
-            if (close.Code != 0) throw new InvalidOperationException("官方管理器退出命令失败。");
-            foreach (Process pr in main)
-                using (pr) { if (!pr.WaitForExit(15000)) return "Android 已停止，但管理器仍未退出；没有强制结束进程。"; }
-            return "Android 已停止，管理器已退出。未使用强制结束。";
         }
 
         public string Optimize(bool undo)
