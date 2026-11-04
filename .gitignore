@@ -1,4 +1,6 @@
 test/
+private/
+android-module/
 tools/*.exe
 *.user
 *.suo

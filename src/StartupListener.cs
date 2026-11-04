@@ -1,0 +1,156 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+namespace MuMuClean
+{
+    // Standalone asInvoker executable. Uses window creation events, never a process polling loop.
+    static class StartupListener
+    {
+        internal const string StopEvent = "Local\\MuMuClean.StartupListener.Stop";
+        delegate void WindowEvent(IntPtr hook, uint evt, IntPtr window, int objectId, int child, uint thread, uint time);
+        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WindowEvent callback, uint pid, uint thread, uint flags);
+        [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+        static readonly ConcurrentDictionary<int, byte> seen = new ConcurrentDictionary<int, byte>();
+        static readonly CancellationTokenSource stopping = new CancellationTokenSource();
+        static WindowEvent callback;
+        static string adb, manager, instance, created;
+
+        [STAThread]
+        static void Main()
+        {
+            bool first;
+            using (var mutex = new Mutex(true, "Local\\MuMuClean.StartupListener", out first))
+            {
+                if (!first) return;
+                using (RegistryKey settings = Registry.CurrentUser.OpenSubKey("Software\\MuMuClean"))
+                {
+                    adb = settings == null ? null : settings.GetValue("StartupAdb") as string;
+                    instance = settings == null ? null : settings.GetValue("StartupInstance") as string;
+                    created = settings == null ? null : settings.GetValue("StartupCreated") as string;
+                }
+                if (String.IsNullOrEmpty(adb) || !File.Exists(adb) || String.IsNullOrEmpty(instance) || String.IsNullOrEmpty(created)) return;
+                manager = Path.Combine(Path.GetDirectoryName(adb), "MuMuManager.exe");
+                if (!File.Exists(manager)) return;
+                using (var stop = new EventWaitHandle(false, EventResetMode.ManualReset, StopEvent))
+                using (var context = new ApplicationContext())
+                using (var dispatcher = new Control())
+                {
+                    IntPtr dispatcherHandle = dispatcher.Handle;
+                    RegisteredWaitHandle wait = ThreadPool.RegisterWaitForSingleObject(stop, (s, expired) => {
+                        stopping.Cancel();
+                        try { dispatcher.BeginInvoke(new Action(context.ExitThread)); }
+                        catch (InvalidOperationException) { }
+                    }, null, Timeout.Infinite, true);
+                    callback = OnWindowCreated;
+                    IntPtr hook = SetWinEventHook(0x8000, 0x8000, IntPtr.Zero, callback, 0, 0, 2);
+                    if (hook == IntPtr.Zero) { wait.Unregister(null); return; }
+                    foreach (Process process in Process.GetProcessesByName("MuMuNxDevice"))
+                        using (process) Check(process.Id);
+                    try { Application.Run(context); }
+                    finally { stopping.Cancel(); UnhookWinEvent(hook); wait.Unregister(null); }
+                }
+            }
+        }
+
+        static void OnWindowCreated(IntPtr hook, uint evt, IntPtr window, int objectId, int child, uint thread, uint time)
+        {
+            if (window == IntPtr.Zero || objectId != 0 || child != 0 || stopping.IsCancellationRequested) return;
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            Check((int)pid);
+        }
+
+        static void Check(int pid)
+        {
+            try { using (Process process = Process.GetProcessById(pid)) if (process.ProcessName != "MuMuNxDevice") return; }
+            catch { return; }
+            if (!seen.TryAdd(pid, 0)) return;
+            Task.Run(() => ResumeAtStartup(pid));
+        }
+
+        static void ResumeAtStartup(int pid)
+        {
+            var deadline = Stopwatch.StartNew();
+            bool matched = false;
+            long lastConnect = -3000;
+            int target;
+            if (!Int32.TryParse(instance, out target)) return;
+            string serial = "127.0.0.1:" + (16384 + target * 32);
+            while (!stopping.IsCancellationRequested && deadline.ElapsedMilliseconds < 120000)
+            {
+                try
+                {
+                    using (Process process = Process.GetProcessById(pid)) if (process.HasExited) return;
+                    if (!matched) matched = MatchesInstance(pid);
+                    bool online = matched && Execute(adb, "-s " + serial + " get-state").Trim() == "device";
+                    if (matched && !online && deadline.ElapsedMilliseconds - lastConnect >= 3000)
+                    {
+                        Execute(adb, "connect " + serial);
+                        lastConnect = deadline.ElapsedMilliseconds;
+                    }
+                    if (online)
+                    {
+                        var policy = new GuestAdPolicy(manager, target);
+                        policy.Apply();
+                        // netd may still initialize its rules during boot. Recheck after Android is ready.
+                        CompleteStartup(policy, serial, pid, deadline);
+                        return;
+                    }
+                }
+                catch { /* The management channel may precede mounted Android data. Retry only during startup. */ }
+                stopping.Token.WaitHandle.WaitOne(750);
+            }
+        }
+
+        static void CompleteStartup(GuestAdPolicy policy, string serial, int pid, Stopwatch deadline)
+        {
+            while (!stopping.IsCancellationRequested && deadline.ElapsedMilliseconds < 120000)
+            {
+                try { using (Process process = Process.GetProcessById(pid)) if (process.HasExited) return; }
+                catch { return; }
+                if (Execute(adb, "-s " + serial + " shell getprop sys.boot_completed").Trim() == "1") break;
+                stopping.Token.WaitHandle.WaitOne(750);
+            }
+            if (stopping.IsCancellationRequested || deadline.ElapsedMilliseconds >= 120000) return;
+            if (!policy.Active()) policy.Apply();
+        }
+
+        static bool MatchesInstance(int pid)
+        {
+            try
+            {
+                var records = new JavaScriptSerializer().Deserialize<Dictionary<string, Dictionary<string, object>>>(Execute(manager, "info -v all"));
+                Dictionary<string, object> record;
+                if (records != null && records.TryGetValue(instance, out record))
+                {
+                    object process, timestamp;
+                    return record.TryGetValue("pid", out process) && Convert.ToInt32(process) == pid
+                        && record.TryGetValue("created_timestamp", out timestamp)
+                        && Convert.ToString(timestamp, System.Globalization.CultureInfo.InvariantCulture) == created;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        static string Execute(string file, string arguments)
+        {
+            using (Process process = Process.Start(new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }))
+            {
+                Task<string> output = process.StandardOutput.ReadToEndAsync(), error = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(3000)) { process.Kill(); return ""; }
+                return output.Result + error.Result;
+            }
+        }
+    }
+}
