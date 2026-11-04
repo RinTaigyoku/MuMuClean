@@ -6,7 +6,7 @@ MuMu 国际版广告又冒出来了，旧规则确实有漏的。这次把启动
 
 **配置一次，以后正常启动 Android，直接用原来的桌面。不用两个桌面来回切，也不用每次打开工具。**
 
-当前正式版：**1.4.0**。下载看 [Releases](https://github.com/RinTaigyoku/MuMuClean/releases/latest)，选 `MuMu清爽助手.exe` 就行，启动助手已经打包在里面。
+当前正式版：**1.4.0**。下载看 [Releases](https://github.com/RinTaigyoku/MuMuClean/releases/latest)，选 `MuMuClean.exe` 就行，启动助手已经打包在里面。
 
 ## 怎么用
 

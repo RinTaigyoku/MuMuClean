@@ -25,4 +25,4 @@ MuMuPlayer 国际版 6.8.9.0 / Android 15，MAA 6.21.3：
 
 MuMu 商店包、系统安装器、`XApkInstallerActivity`、`InstallLocalApkService` 和安装广播保持启用。只关闭四个广告推荐/追踪组件，不停用整个商店包。
 
-`MuMu清爽助手.exe --maa-check` 可读取当前 ADB、设备、商店、安装器和广告组件状态；`--ad-audit` 可检查广告规则。命令输出只在本机生成，反馈问题前请自行隐去路径和设备信息。
+`MuMuClean.exe --maa-check` 可读取当前 ADB、设备、商店、安装器和广告组件状态；`--ad-audit` 可检查广告规则。命令输出只在本机生成，反馈问题前请自行隐去路径和设备信息。
