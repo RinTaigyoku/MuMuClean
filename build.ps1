@@ -22,4 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw '启动助手编译失败。' }
 & $csc /nologo /main:MuMuClean.Program /target:winexe /optimize+ /platform:anycpu /win32manifest:$manifest /win32icon:$icon /out:$out "/resource:$uidBinary,MuMuClean.UidFilter" "/resource:$listener,MuMuClean.Startup.exe" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $src
 if ($LASTEXITCODE -ne 0) { throw "编译失败，退出码 $LASTEXITCODE" }
 Write-Host "已生成: $out"
-Get-FileHash -Algorithm SHA256 -LiteralPath $out
+$hashes = @(Get-FileHash -Algorithm SHA256 -LiteralPath $out, $listener)
+$sums = @($hashes | ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_.Path) })
+[IO.File]::WriteAllLines((Join-Path $root 'dist\SHA256.txt'), [string[]]$sums)
+$hashes
