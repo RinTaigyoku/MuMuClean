@@ -23,7 +23,7 @@ namespace MuMuClean
         static readonly ConcurrentDictionary<int, byte> seen = new ConcurrentDictionary<int, byte>();
         static readonly CancellationTokenSource stopping = new CancellationTokenSource();
         static WindowEvent callback;
-        static string adb, manager, instance, created;
+        static string adb, manager, instance, created, stateDirectory;
 
         [STAThread]
         static void Main()
@@ -37,7 +37,12 @@ namespace MuMuClean
                     adb = settings == null ? null : settings.GetValue("StartupAdb") as string;
                     instance = settings == null ? null : settings.GetValue("StartupInstance") as string;
                     created = settings == null ? null : settings.GetValue("StartupCreated") as string;
+                    stateDirectory = settings == null ? null : settings.GetValue("StartupStateDirectory") as string;
                 }
+                string common = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "MuMuAdCleaner");
+                if (stateDirectory == null) stateDirectory = common;
+                stateDirectory = Path.GetFullPath(stateDirectory).TrimEnd('\\');
+                if (!String.Equals(stateDirectory, common, StringComparison.OrdinalIgnoreCase) && !stateDirectory.StartsWith(common + "\\", StringComparison.OrdinalIgnoreCase)) return;
                 if (String.IsNullOrEmpty(adb) || !File.Exists(adb) || String.IsNullOrEmpty(instance) || String.IsNullOrEmpty(created)) return;
                 manager = Path.Combine(Path.GetDirectoryName(adb), "MuMuManager.exe");
                 if (!File.Exists(manager)) return;
@@ -91,7 +96,12 @@ namespace MuMuClean
                 try
                 {
                     using (Process process = Process.GetProcessById(pid)) if (process.HasExited) return;
-                    if (!matched) matched = MatchesInstance(pid);
+                    if (!matched)
+                    {
+                        int match = MatchesInstance(pid);
+                        if (match < 0) return;
+                        matched = match > 0;
+                    }
                     bool online = matched && Execute(adb, "-s " + serial + " get-state").Trim() == "device";
                     if (matched && !online && deadline.ElapsedMilliseconds - lastConnect >= 3000)
                     {
@@ -123,34 +133,41 @@ namespace MuMuClean
             }
             if (stopping.IsCancellationRequested || deadline.ElapsedMilliseconds >= 120000) return;
             if (!policy.Active()) policy.Apply();
+            // A legacy ROM can provision the store during its first startup.
+            new AdComponentControl(adb, serial, stateDirectory).Apply(new QuietProgress(), false);
         }
 
-        static bool MatchesInstance(int pid)
+        sealed class QuietProgress : IProgress<string> { public void Report(string message) { } }
+
+        static int MatchesInstance(int pid)
         {
             try
             {
-                var records = new JavaScriptSerializer().Deserialize<Dictionary<string, Dictionary<string, object>>>(Execute(manager, "info -v all"));
-                Dictionary<string, object> record;
-                if (records != null && records.TryGetValue(instance, out record))
+                var record = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(Execute(manager, "info -v " + instance));
+                if (record != null)
                 {
                     object process, timestamp;
-                    return record.TryGetValue("pid", out process) && Convert.ToInt32(process) == pid
-                        && record.TryGetValue("created_timestamp", out timestamp)
-                        && Convert.ToString(timestamp, System.Globalization.CultureInfo.InvariantCulture) == created;
+                    if (record.TryGetValue("created_timestamp", out timestamp) && Convert.ToString(timestamp, System.Globalization.CultureInfo.InvariantCulture) != created) return -1;
+                    if (record.TryGetValue("pid", out process))
+                    {
+                        int running = Convert.ToInt32(process);
+                        if (running == pid) return 1;
+                        if (running > 0)
+                        {
+                            try { using (Process other = Process.GetProcessById(running)) if (!other.HasExited) return -1; }
+                            catch (ArgumentException) { }
+                        }
+                    }
                 }
             }
             catch { }
-            return false;
+            return 0;
         }
 
         static string Execute(string file, string arguments)
         {
-            using (Process process = Process.Start(new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }))
-            {
-                Task<string> output = process.StandardOutput.ReadToEndAsync(), error = process.StandardError.ReadToEndAsync();
-                if (!process.WaitForExit(3000)) { process.Kill(); return ""; }
-                return output.Result + error.Result;
-            }
+            NativeCommand.Result result = NativeCommand.Run(file, arguments);
+            return result.Code == 0 ? result.Output : "";
         }
     }
 }

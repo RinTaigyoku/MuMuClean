@@ -10,7 +10,13 @@
 
 广告网络规则只针对原桌面和商店的应用身份。明日方舟和普通用户 App 不在名单内；增强截图和触控没有被替换或代理。
 
-## 实际复查
+## 1.5.0 / Android 12
+
+MuMu 5.30.2.3616 / Android 12、MAA 6.21.4：主实例、可选 Root 框架开启实例、回退后的免 Root 实例均完成连接，每轮五次有效 PNG 和触控接口检查。主实例与免 Root 临时实例另外验证了 MuMu 增强截图，实际选用 `MumuExtras`；普通触控使用 `maatouch`。
+
+5.30.2 不具备新版 MuMu 的增强触控接口，保持已有可用触控方式即可。本工具不修改 MAA 配置。可选 Root 配置和回退会重启主实例，先结束 MAA 当前任务；框架本身的开销与模块兼容性和去广告分开。
+
+## 1.4.0 / Android 15 历史复查
 
 MuMuPlayer 国际版 6.8.9.0 / Android 15，MAA 6.21.3：
 
@@ -23,6 +29,6 @@ MuMuPlayer 国际版 6.8.9.0 / Android 15，MAA 6.21.3：
 
 ## 安装能力
 
-MuMu 商店包、系统安装器、`XApkInstallerActivity`、`InstallLocalApkService` 和安装广播保持启用。只关闭四个广告推荐/追踪组件，不停用整个商店包。
+MuMu 商店包、系统安装器、`XApkInstallerActivity`、`InstallLocalApkService` 和安装广播保持启用。按当前版本实际声明的广告推荐/追踪组件处理，不停用整个商店包。
 
 `MuMuClean.exe --maa-check` 可读取当前 ADB、设备、商店、安装器和广告组件状态；`--ad-audit` 可检查广告规则。命令输出只在本机生成，反馈问题前请自行隐去路径和设备信息。

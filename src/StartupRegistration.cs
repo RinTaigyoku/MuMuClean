@@ -20,8 +20,13 @@ namespace MuMuClean
                 return key != null && String.Equals(key.GetValue(RunName) as string, Command, StringComparison.OrdinalIgnoreCase) && File.Exists(FilePath);
         }
 
-        internal static void Enable(string adb, string serial = "127.0.0.1:16384")
+        internal static void Enable(string adb, string serial = "127.0.0.1:16384", string stateDirectory = null)
         {
+            string common = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "MuMuAdCleaner");
+            if (stateDirectory == null) stateDirectory = common;
+            stateDirectory = Path.GetFullPath(stateDirectory).TrimEnd('\\');
+            if (!String.Equals(stateDirectory, common, StringComparison.OrdinalIgnoreCase) && !stateDirectory.StartsWith(common + "\\", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("恢复目录超出本程序范围，未注册启动助手。");
             var match = System.Text.RegularExpressions.Regex.Match(serial, @"^127\.0\.0\.1:(\d+)$");
             int port;
             if (!match.Success || !Int32.TryParse(match.Groups[1].Value, out port) || port < 16384 || port > 65535 || (port - 16384) % 32 != 0)
@@ -49,6 +54,7 @@ namespace MuMuClean
                     settings.SetValue("StartupAdb", adb);
                     settings.SetValue("StartupInstance", instance.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     settings.SetValue("StartupCreated", created);
+                    settings.SetValue("StartupStateDirectory", stateDirectory);
                 }
                 key.SetValue(RunName, Command);
             }
@@ -62,7 +68,7 @@ namespace MuMuClean
             Stop();
             if (File.Exists(FilePath)) File.Delete(FilePath);
             using (RegistryKey settings = Registry.CurrentUser.OpenSubKey("Software\\MuMuClean", true))
-                if (settings != null) { settings.DeleteValue("StartupAdb", false); settings.DeleteValue("StartupInstance", false); settings.DeleteValue("StartupCreated", false); }
+                if (settings != null) { settings.DeleteValue("StartupAdb", false); settings.DeleteValue("StartupInstance", false); settings.DeleteValue("StartupCreated", false); settings.DeleteValue("StartupStateDirectory", false); }
         }
 
         static void Stop()
